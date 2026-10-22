@@ -15,6 +15,8 @@ h1{font-size:20px;margin:0}
 .sub{color:var(--mut);font-size:13px}
 .badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:bold;color:#fff;background:var(--mut)}
 .badge.on{background:var(--bat)}.badge.off{background:var(--bad)}
+.badges{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.card.stale .metrics{opacity:.4}
 .live{display:none;margin-left:6px;font-size:11px;font-weight:bold;color:var(--bat)}
 .live.show{display:inline}
 .live::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--bat);margin-right:4px;animation:pulse 1.4s infinite}
@@ -57,7 +59,11 @@ footer{margin:14px 0 4px;color:var(--mut);font-size:12px}
       <h1>Monitoring Panel Surya &rarr; Baterai Portable</h1>
       <div class="sub" id="last">Memuat data...</div>
     </div>
-    <div><span class="badge" id="status">...</span><span class="live" id="liveTag">LIVE</span></div>
+    <div class="badges">
+      <span class="badge" id="status">ESP32: ...</span>
+      <span class="badge" id="pzemStatus">PZEM: ...</span>
+      <span class="live" id="liveTag">LIVE</span>
+    </div>
   </header>
 
   <div class="banner" id="banner"></div>
@@ -104,7 +110,7 @@ const CONFIG = {
 
   // Alamat Firebase Realtime Database (sama dengan FIREBASE_URL di program ESP32, tanpa garis miring di akhir)
   FIREBASE_URL: 'https://monitoring-panel-dc5ba-default-rtdb.asia-southeast1.firebasedatabase.app',
-  LIVE_OFFLINE_SEC: 20,  // dianggap offline jika data Firebase lebih tua dari ini (ESP32 kirim tiap 5 detik)
+  LIVE_OFFLINE_SEC: 30,  // dianggap offline jika data Firebase lebih tua dari ini (ESP32 kirim tiap 5 detik)
 
   REFRESH_MS: 60000,     // refresh grafik Spreadsheet
   HISTORY_POINTS: 120    // 120 titik x 2 menit = 4 jam
@@ -126,7 +132,7 @@ const FB_READY = !DEMO && /^https:\/\//.test(CONFIG.FIREBASE_URL);
 
 // ---- kartu ----
 $('cards').innerHTML = DEVICES.map(d => `
-  <div class="card">
+  <div class="card" id="card-${d.id}">
     <h2><span class="dot" style="background:var(--${d.cls})"></span>${d.name}</h2>
     <p class="desc">${d.desc}</p>
     <div class="metrics">
@@ -167,21 +173,39 @@ function demoData() {
 const fmt = (v, d) => Number(v).toLocaleString('id-ID', { minimumFractionDigits: d, maximumFractionDigits: d });
 function ago(s) { return s < 60 ? s + ' detik lalu' : s < 3600 ? Math.round(s / 60) + ' menit lalu' : Math.round(s / 3600) + ' jam lalu'; }
 
-function renderDevice(id, d) {
+function renderDevice(id, d, note, stale) {
   FIELDS.forEach(f => { $(id + '-' + f[0]).textContent = d ? fmt(d[f[0]], f[3]) : '-'; });
+  const card = $('card-' + id);
+  if (card) card.classList.toggle('stale', !!stale);
   const a = $(id + '-alarm'), txt = d ? String(d.alarm || 'OK') : '';
+  if (note) { a.className = 'alarm bad'; a.textContent = note; return; }
   a.className = 'alarm' + (d && txt !== 'OK' ? ' bad' : '');
   a.textContent = !d ? 'Belum ada data dari sensor ini' : txt === 'OK' ? 'Alarm: normal' : 'Alarm: ' + txt;
 }
 
 function renderLatest(res) {
   const n = norm(res.data);
-  renderDevice('panel', n.panel);
+
+  // Dua status terpisah:
+  //  - ESP32: Online/Offline  -> ada/tidaknya data baru yang masuk (WiFi putus, ESP32 mati, atau tanpa internet)
+  //  - PZEM : terbaca/tidak   -> dilaporkan ESP32 (hanya diketahui saat ESP32 online)
+  let note = '', stale = false;
+  if (!res.online) { note = 'ESP32 offline (WiFi terputus / ESP32 mati). Angka adalah data terakhir yang diterima.'; stale = true; }
+  else if (res.pzem === false) { note = 'Sensor PZEM tidak terbaca (cek kabel RS485 / MAX485). Angka adalah nilai terakhir yang berhasil dibaca.'; stale = true; }
+  renderDevice('panel', n.panel, n.panel ? note : '', stale);
   renderDevice('battery', n.battery);
+
   const st = $('status');
-  st.textContent = res.online ? 'Online' : 'Offline';
+  st.textContent = 'ESP32: ' + (res.online ? 'Online' : 'Offline');
   st.className = 'badge ' + (res.online ? 'on' : 'off');
-  $('last').textContent = 'Data terakhir: ' + new Date(n.ts).toLocaleString('id-ID') + ' (' + ago(res.ageSec) + ')';
+  const pz = $('pzemStatus');
+  if (!res.online) { pz.textContent = 'PZEM: tidak diketahui'; pz.className = 'badge'; }
+  else if (res.pzem === false) { pz.textContent = 'PZEM: tidak terbaca'; pz.className = 'badge off'; }
+  else if (res.pzem === true) { pz.textContent = 'PZEM: terbaca'; pz.className = 'badge on'; }
+  else { pz.textContent = 'PZEM: -'; pz.className = 'badge'; }
+
+  $('last').textContent = 'Data terakhir: ' + new Date(n.ts).toLocaleString('id-ID') + ' (' + ago(res.ageSec) + ')'
+    + (res.online && res.rssi != null ? ' · WiFi ' + res.rssi + ' dBm' : '');
   if (n.panel && n.battery && n.panel.power > 1) {
     $('eff').textContent = fmt(n.battery.power / n.panel.power * 100, 1) + ' %';
     $('loss').textContent = fmt(n.panel.power - n.battery.power, 1) + ' W';
@@ -218,7 +242,9 @@ function applyLive() {
   renderLatest({
     data: { ts: live.ts, panel: { voltage: live.v, current: live.i, power: live.p, energy: live.e, alarm: live.alarm } },
     online: age <= CONFIG.LIVE_OFFLINE_SEC,
-    ageSec: age
+    ageSec: age,
+    pzem: live.pzem,     // true / false (undefined jika ESP32 masih program lama)
+    rssi: live.rssi
   });
   $('liveTag').classList.toggle('show', age <= CONFIG.LIVE_OFFLINE_SEC);
 }
@@ -280,7 +306,7 @@ async function refresh() {
     if (demoMode) throw new Error('demo');
     const [latest, hist] = await Promise.all([api({ action: 'latest' }), api({ action: 'history', limit: CONFIG.HISTORY_POINTS })]);
     if (latest.empty) {
-      banner('Spreadsheet masih kosong. Menunggu data dari ESP32.');
+      if (!liveFresh()) banner('Spreadsheet masih kosong. Menunggu data dari ESP32.');
       if (!live) { $('last').textContent = 'Belum ada data'; $('status').textContent = 'Menunggu'; }
       drawChart([]); return;
     }
