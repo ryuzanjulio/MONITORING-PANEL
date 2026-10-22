@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitoring Panel Surya</title>
+<style>
+:root{--bg:#f4f6f8;--card:#fff;--tx:#1c2430;--mut:#667085;--bd:#e3e8ee;--pan:#d97706;--bat:#15803d;--bad:#c0392b}
+@media (prefers-color-scheme:dark){:root{--bg:#10151c;--card:#19212b;--tx:#e8edf3;--mut:#93a0b0;--bd:#2a3542;--pan:#f5a742;--bat:#4cc38a;--bad:#ff7a6b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 Arial,Helvetica,sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:16px}
+header{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between;margin-bottom:12px}
+h1{font-size:20px;margin:0}
+.sub{color:var(--mut);font-size:13px}
+.badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:bold;color:#fff;background:var(--mut)}
+.badge.on{background:var(--bat)}.badge.off{background:var(--bad)}
+.banner{background:#fff3cd;color:#7a5b00;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:13px;display:none}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px 16px}
+.card h2{font-size:16px;margin:0 0 2px;display:flex;align-items:center;gap:8px}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.desc{color:var(--mut);font-size:12.5px;margin:0 0 10px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.m .l{color:var(--mut);font-size:12px}
+.m .v{font-size:24px;font-weight:bold}
+.m .u{font-size:13px;color:var(--mut);font-weight:normal;margin-left:3px}
+.alarm{margin-top:10px;font-size:12.5px;color:var(--mut)}
+.alarm.bad{color:var(--bad);font-weight:bold}
+.sum{margin-top:12px}
+.sum .metrics{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.chart{margin-top:12px}
+.legend{display:flex;gap:16px;font-size:13px;color:var(--mut);margin:4px 0}
+svg{width:100%;height:auto;display:block}
+svg text{fill:var(--mut);font-size:11px;font-family:Arial,sans-serif}
+.grid-l{stroke:var(--bd);stroke-width:1}
+.ln{fill:none;stroke-width:2;stroke-linejoin:round}
+.ln.pan{stroke:var(--pan)}.ln.bat{stroke:var(--bat)}
+footer{margin:14px 0 4px;color:var(--mut);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Monitoring Panel Surya &rarr; Baterai Portable</h1>
+      <div class="sub" id="last">Memuat data...</div>
+    </div>
+    <span class="badge" id="status">...</span>
+  </header>
+
+  <div class="banner" id="banner"></div>
+
+  <div class="grid" id="cards"></div>
+
+  <div class="card sum">
+    <h2>Perbandingan Panel &amp; Baterai</h2>
+    <p class="desc">Selisih daya antara sisi panel dan sisi baterai menunjukkan rugi-rugi (kabel, charge controller, dsb).</p>
+    <div class="metrics">
+      <div class="m"><div class="l">Efisiensi (Baterai &divide; Panel)</div><div class="v" id="eff">-</div></div>
+      <div class="m"><div class="l">Selisih daya</div><div class="v" id="loss">-</div></div>
+    </div>
+  </div>
+
+  <div class="card chart">
+    <h2>Grafik Daya</h2>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--pan)"></span> Panel (W)</span>
+      <span><span class="dot" style="background:var(--bat)"></span> Baterai (W)</span>
+    </div>
+    <div id="chart"></div>
+  </div>
+
+  <footer>Diperbarui otomatis tiap 30 detik. Tambahkan <code>?demo=1</code> pada alamat untuk melihat tampilan dengan data contoh.</footer>
+</div>
+
+<script>
+const CONFIG = {
+  API_URL: 'https://script.google.com/macros/s/AKfycbweoFAJxPzS4JceA5hiBrAV3UMhBEmmeWRuoyidHBqAALJ7YoMu2yyucSUmIRSwPHW3/exec',
+  READ_KEY: '',          // isi jika READ_KEY di Code.gs diaktifkan
+  REFRESH_MS: 30000,
+  HISTORY_POINTS: 120    // 120 titik x 30 detik = 1 jam
+};
+
+const DEVICES = [
+  { id: 'panel',   name: 'PZEM Panel Surya', cls: 'pan', desc: 'Mengukur keluaran panel surya (sisi masuk menuju charge controller / baterai).' },
+  { id: 'battery', name: 'PZEM Baterai',     cls: 'bat', desc: 'Mengukur sisi baterai portable (tegangan baterai dan arus pengisian).' }
+];
+const FIELDS = [
+  ['voltage', 'Tegangan', 'V', 2], ['current', 'Arus', 'A', 2],
+  ['power', 'Daya', 'W', 1],       ['energy', 'Energi', 'Wh', 0]
+];
+
+const $ = id => document.getElementById(id);
+const DEMO = new URLSearchParams(location.search).has('demo');
+let demoMode = DEMO;
+
+// ---- kartu ----
+$('cards').innerHTML = DEVICES.map(d => `
+  <div class="card">
+    <h2><span class="dot" style="background:var(--${d.cls})"></span>${d.name}</h2>
+    <p class="desc">${d.desc}</p>
+    <div class="metrics">
+      ${FIELDS.map(f => `<div class="m"><div class="l">${f[1]}</div><div class="v"><span id="${d.id}-${f[0]}">-</span><span class="u">${f[2]}</span></div></div>`).join('')}
+    </div>
+    <div class="alarm" id="${d.id}-alarm">Belum ada data</div>
+  </div>`).join('');
+
+// ---- API ----
+async function api(params) {
+  if (CONFIG.READ_KEY) params.key = CONFIG.READ_KEY;
+  const r = await fetch(CONFIG.API_URL + '?' + new URLSearchParams(params));
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.error || 'API error');
+  return j;
+}
+
+// Mendukung format baru {panel:{...}, battery:{...}} dan format lama (1 PZEM) yang dianggap "panel".
+function norm(d) {
+  if (d.panel || d.battery) return { ts: d.ts, time: d.time, panel: d.panel || null, battery: d.battery || null };
+  return { ts: d.ts, time: d.time, panel: d, battery: null };
+}
+
+// ---- data demo ----
+function demoRow(ts) {
+  const base = 40 + 25 * Math.sin(ts / 600000);
+  const pp = Math.max(0, base + Math.random() * 4), pb = pp * (0.88 + Math.random() * 0.05);
+  const mk = (p, v) => ({ voltage: v, current: p / v, power: p, energy: Math.round(ts / 3600000 % 500), alarm: 'OK' });
+  return { ts, time: new Date(ts).toISOString(), panel: mk(pp, 18 + Math.random()), battery: mk(pb, 13 + Math.random() * 0.5) };
+}
+function demoData() {
+  const now = Date.now(), rows = [];
+  for (let i = CONFIG.HISTORY_POINTS - 1; i >= 0; i--) rows.push(demoRow(now - i * 30000));
+  return { latest: { data: rows[rows.length - 1], online: true, ageSec: 0 }, rows };
+}
+
+// ---- render ----
+const fmt = (v, d) => Number(v).toLocaleString('id-ID', { minimumFractionDigits: d, maximumFractionDigits: d });
+function ago(s) { return s < 60 ? s + ' detik lalu' : s < 3600 ? Math.round(s / 60) + ' menit lalu' : Math.round(s / 3600) + ' jam lalu'; }
+
+function renderDevice(id, d) {
+  FIELDS.forEach(f => { $(id + '-' + f[0]).textContent = d ? fmt(d[f[0]], f[3]) : '-'; });
+  const a = $(id + '-alarm'), txt = d ? String(d.alarm || 'OK') : '';
+  a.className = 'alarm' + (d && txt !== 'OK' ? ' bad' : '');
+  a.textContent = !d ? 'Belum ada data dari sensor ini' : txt === 'OK' ? 'Alarm: normal' : 'Alarm: ' + txt;
+}
+
+function renderLatest(res) {
+  const n = norm(res.data);
+  renderDevice('panel', n.panel);
+  renderDevice('battery', n.battery);
+  const st = $('status');
+  st.textContent = res.online ? 'Online' : 'Offline';
+  st.className = 'badge ' + (res.online ? 'on' : 'off');
+  $('last').textContent = 'Data terakhir: ' + new Date(n.ts).toLocaleString('id-ID') + ' (' + ago(res.ageSec) + ')';
+  if (n.panel && n.battery && n.panel.power > 1) {
+    $('eff').textContent = fmt(n.battery.power / n.panel.power * 100, 1) + ' %';
+    $('loss').textContent = fmt(n.panel.power - n.battery.power, 1) + ' W';
+  } else { $('eff').textContent = '-'; $('loss').textContent = '-'; }
+}
+
+function drawChart(rows) {
+  const W = 700, H = 240, L = 44, R = 12, T = 12, B = 24;
+  const pts = rows.map(norm).map(r => ({ t: r.ts, a: r.panel ? r.panel.power : null, b: r.battery ? r.battery.power : null }));
+  if (!pts.length) { $('chart').innerHTML = '<p class="desc">Belum ada data.</p>'; return; }
+  const vals = pts.flatMap(p => [p.a, p.b]).filter(v => v != null);
+  const max = Math.max(10, ...vals) * 1.1, t0 = pts[0].t, t1 = pts[pts.length - 1].t;
+  const X = t => L + (t - t0) / ((t1 - t0) || 1) * (W - L - R);
+  const Y = v => H - B - v / max * (H - T - B);
+  const path = k => { let s = '', pen = false; pts.forEach(p => { if (p[k] == null) { pen = false; return; } s += (pen ? 'L' : 'M') + X(p.t).toFixed(1) + ' ' + Y(p[k]).toFixed(1); pen = true; }); return s; };
+  let g = '';
+  for (let i = 0; i <= 4; i++) {
+    const v = max / 1.1 * i / 4, y = Y(v).toFixed(1);
+    g += `<line class="grid-l" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/><text x="${L - 6}" y="${+y + 4}" text-anchor="end">${Math.round(v)}</text>`;
+  }
+  const tm = t => new Date(t).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+  g += `<text x="${L}" y="${H - 6}">${tm(t0)}</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${tm(t1)}</text>`;
+  $('chart').innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Grafik daya panel dan baterai">${g}<path class="ln pan" d="${path('a')}"/><path class="ln bat" d="${path('b')}"/></svg>`;
+}
+
+function banner(msg) { const b = $('banner'); b.textContent = msg || ''; b.style.display = msg ? 'block' : 'none'; }
+
+async function refresh() {
+  try {
+    if (demoMode) throw new Error('demo');
+    const [latest, hist] = await Promise.all([api({ action: 'latest' }), api({ action: 'history', limit: CONFIG.HISTORY_POINTS })]);
+    if (latest.empty) { banner('Spreadsheet masih kosong. Menunggu data dari ESP32.'); $('last').textContent = 'Belum ada data'; $('status').textContent = 'Menunggu'; drawChart([]); return; }
+    banner('');
+    renderLatest(latest);
+    drawChart(hist.data);
+  } catch (e) {
+    const d = demoData();
+    banner(DEMO ? 'Mode demo: data di bawah hanya contoh.' : 'Tidak bisa mengambil data dari API (' + e.message + '). Menampilkan data contoh.');
+    renderLatest(d.latest);
+    drawChart(d.rows);
+  }
+}
+refresh();
+setInterval(refresh, CONFIG.REFRESH_MS);
+</script>
+</body>
+</html>
