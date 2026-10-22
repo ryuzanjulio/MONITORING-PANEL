@@ -15,6 +15,10 @@ h1{font-size:20px;margin:0}
 .sub{color:var(--mut);font-size:13px}
 .badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:bold;color:#fff;background:var(--mut)}
 .badge.on{background:var(--bat)}.badge.off{background:var(--bad)}
+.live{display:none;margin-left:6px;font-size:11px;font-weight:bold;color:var(--bat)}
+.live.show{display:inline}
+.live::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--bat);margin-right:4px;animation:pulse 1.4s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 .banner{background:#fff3cd;color:#7a5b00;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:13px;display:none}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
 .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px 16px}
@@ -53,7 +57,7 @@ footer{margin:14px 0 4px;color:var(--mut);font-size:12px}
       <h1>Monitoring Panel Surya &rarr; Baterai Portable</h1>
       <div class="sub" id="last">Memuat data...</div>
     </div>
-    <span class="badge" id="status">...</span>
+    <div><span class="badge" id="status">...</span><span class="live" id="liveTag">LIVE</span></div>
   </header>
 
   <div class="banner" id="banner"></div>
@@ -71,6 +75,7 @@ footer{margin:14px 0 4px;color:var(--mut);font-size:12px}
 
   <div class="card chart">
     <h2>Grafik Daya</h2>
+    <p class="desc">Riwayat dari Spreadsheet (satu titik tiap 2 menit).</p>
     <div class="legend">
       <span><span class="dot" style="background:var(--pan)"></span> Panel (W)</span>
       <span><span class="dot" style="background:var(--bat)"></span> Baterai (W)</span>
@@ -80,7 +85,7 @@ footer{margin:14px 0 4px;color:var(--mut);font-size:12px}
 
   <div class="card ctl">
     <h2>Kontrol Perangkat</h2>
-    <p class="desc">Perintah diteruskan ke ESP32 saat pengiriman data berikutnya (maksimal sekitar 30 detik). Butuh kunci admin.</p>
+    <p class="desc">Perintah diteruskan ke ESP32 saat pengiriman data Spreadsheet berikutnya (maksimal sekitar 2 menit). Butuh kunci admin.</p>
     <div class="row"><input type="password" id="adminKey" placeholder="Kunci admin" autocomplete="off"></div>
     <div class="row">
       <button class="btn" id="btnReset" onclick="sendCmd('reset_energy','Reset energi (Wh)')">Reset Energi (Wh)</button>
@@ -89,15 +94,20 @@ footer{margin:14px 0 4px;color:var(--mut);font-size:12px}
     <div id="cmdMsg"></div>
   </div>
 
-  <footer>Diperbarui otomatis tiap 30 detik. Tambahkan <code>?demo=1</code> pada alamat untuk melihat tampilan dengan data contoh.</footer>
+  <footer>Angka di kartu real-time dari Firebase. Grafik diperbarui tiap 1 menit dari Spreadsheet. Tambahkan <code>?demo=1</code> pada alamat untuk melihat tampilan dengan data contoh.</footer>
 </div>
 
 <script>
 const CONFIG = {
   API_URL: 'https://script.google.com/macros/s/AKfycbzUg2vpWQcHK1LVCfAr4DG1blpG1SWV9TT8zB271Pw4P94go6i_MMAFdTEVA6GR-zYf/exec',
   READ_KEY: '',          // isi jika READ_KEY di Code.gs diaktifkan
-  REFRESH_MS: 30000,
-  HISTORY_POINTS: 120    // 120 titik x 30 detik = 1 jam
+
+  // Alamat Firebase Realtime Database (sama dengan FIREBASE_URL di program ESP32, tanpa garis miring di akhir)
+  FIREBASE_URL: 'https://monitoring-panel-dc5ba-default-rtdb.asia-southeast1.firebasedatabase.app',
+  LIVE_OFFLINE_SEC: 20,  // dianggap offline jika data Firebase lebih tua dari ini (ESP32 kirim tiap 5 detik)
+
+  REFRESH_MS: 60000,     // refresh grafik Spreadsheet
+  HISTORY_POINTS: 120    // 120 titik x 2 menit = 4 jam
 };
 
 const DEVICES = [
@@ -112,6 +122,7 @@ const FIELDS = [
 const $ = id => document.getElementById(id);
 const DEMO = new URLSearchParams(location.search).has('demo');
 let demoMode = DEMO;
+const FB_READY = !DEMO && /^https:\/\//.test(CONFIG.FIREBASE_URL);
 
 // ---- kartu ----
 $('cards').innerHTML = DEVICES.map(d => `
@@ -124,7 +135,7 @@ $('cards').innerHTML = DEVICES.map(d => `
     <div class="alarm" id="${d.id}-alarm">Belum ada data</div>
   </div>`).join('');
 
-// ---- API ----
+// ---- API (Spreadsheet) ----
 async function api(params) {
   if (CONFIG.READ_KEY) params.key = CONFIG.READ_KEY;
   const r = await fetch(CONFIG.API_URL + '?' + new URLSearchParams(params));
@@ -148,7 +159,7 @@ function demoRow(ts) {
 }
 function demoData() {
   const now = Date.now(), rows = [];
-  for (let i = CONFIG.HISTORY_POINTS - 1; i >= 0; i--) rows.push(demoRow(now - i * 30000));
+  for (let i = CONFIG.HISTORY_POINTS - 1; i >= 0; i--) rows.push(demoRow(now - i * 120000));
   return { latest: { data: rows[rows.length - 1], online: true, ageSec: 0 }, rows };
 }
 
@@ -196,6 +207,46 @@ function drawChart(rows) {
   $('chart').innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Grafik daya panel dan baterai">${g}<path class="ln pan" d="${path('a')}"/><path class="ln bat" d="${path('b')}"/></svg>`;
 }
 
+// ---- REAL-TIME dari Firebase (EventSource: server mendorong data begitu ESP32 menulis) ----
+let live = null;   // {v,i,p,e,alarm,ts} terakhir dari Firebase
+
+function liveFresh() { return !!live && (Date.now() - live.ts) <= CONFIG.LIVE_OFFLINE_SEC * 1000; }
+
+function applyLive() {
+  if (!live || !live.ts) return;
+  const age = Math.max(0, Math.round((Date.now() - live.ts) / 1000));
+  renderLatest({
+    data: { ts: live.ts, panel: { voltage: live.v, current: live.i, power: live.p, energy: live.e, alarm: live.alarm } },
+    online: age <= CONFIG.LIVE_OFFLINE_SEC,
+    ageSec: age
+  });
+  $('liveTag').classList.toggle('show', age <= CONFIG.LIVE_OFFLINE_SEC);
+}
+
+function startLive() {
+  if (!FB_READY) return;
+  const es = new EventSource(CONFIG.FIREBASE_URL.replace(/\/$/, '') + '/solar/live.json');
+  const onData = ev => {
+    try {
+      const m = JSON.parse(ev.data);
+      if (m.path === '/') {
+        if (m.data === null) return;
+        live = ev.type === 'patch' ? Object.assign(live || {}, m.data) : m.data;
+      } else if (live) {
+        live[m.path.replace(/^\//, '')] = m.data;
+      }
+      banner('');
+      applyLive();
+    } catch (e) { /* abaikan data rusak */ }
+  };
+  es.addEventListener('put', onData);
+  es.addEventListener('patch', onData);
+  es.onerror = () => { $('liveTag').classList.remove('show'); };   // EventSource menyambung ulang sendiri
+}
+// perbarui "x detik lalu" dan status Online/Offline tiap detik
+setInterval(applyLive, 1000);
+
+// ---- kontrol ----
 let cmdBusy = false;
 async function sendCmd(cmd, label) {
   if (cmdBusy) return;
@@ -207,8 +258,8 @@ async function sendCmd(cmd, label) {
   cmdBusy = true; $('btnReset').disabled = $('btnRestart').disabled = true;
   try {
     await api({ action: 'command', cmd: cmd, admin: key });
-    msg.textContent = 'Perintah terkirim. Menunggu ESP32 mengambilnya (maks. 1 menit)...';
-    for (let n = 0; n < 12; n++) {
+    msg.textContent = 'Perintah terkirim. Menunggu ESP32 mengambilnya (maks. sekitar 2 menit)...';
+    for (let n = 0; n < 28; n++) {
       await new Promise(r => setTimeout(r, 5000));
       const st = await api({ action: 'latest' });
       if (!st.pendingCmd) { msg.textContent = 'ESP32 sudah menerima perintah: ' + label + '.'; refresh(); return; }
@@ -223,21 +274,28 @@ async function sendCmd(cmd, label) {
 
 function banner(msg) { const b = $('banner'); b.textContent = msg || ''; b.style.display = msg ? 'block' : 'none'; }
 
+// ---- Spreadsheet: grafik riwayat (dan kartu bila Firebase belum aktif) ----
 async function refresh() {
   try {
     if (demoMode) throw new Error('demo');
     const [latest, hist] = await Promise.all([api({ action: 'latest' }), api({ action: 'history', limit: CONFIG.HISTORY_POINTS })]);
-    if (latest.empty) { banner('Spreadsheet masih kosong. Menunggu data dari ESP32.'); $('last').textContent = 'Belum ada data'; $('status').textContent = 'Menunggu'; drawChart([]); return; }
-    banner('');
-    renderLatest(latest);
+    if (latest.empty) {
+      banner('Spreadsheet masih kosong. Menunggu data dari ESP32.');
+      if (!live) { $('last').textContent = 'Belum ada data'; $('status').textContent = 'Menunggu'; }
+      drawChart([]); return;
+    }
+    if (!liveFresh()) { banner(''); renderLatest(latest); }
     drawChart(hist.data);
   } catch (e) {
+    if (liveFresh()) return;   // kartu sudah live dari Firebase; grafik dibiarkan apa adanya
     const d = demoData();
     banner(DEMO ? 'Mode demo: data di bawah hanya contoh.' : 'Tidak bisa mengambil data dari API (' + e.message + '). Menampilkan data contoh.');
     renderLatest(d.latest);
     drawChart(d.rows);
   }
 }
+
+startLive();
 refresh();
 setInterval(refresh, CONFIG.REFRESH_MS);
 </script>
