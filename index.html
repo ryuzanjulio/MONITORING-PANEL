@@ -36,6 +36,13 @@ svg text{fill:var(--mut);font-size:11px;font-family:Arial,sans-serif}
 .grid-l{stroke:var(--bd);stroke-width:1}
 .ln{fill:none;stroke-width:2;stroke-linejoin:round}
 .ln.pan{stroke:var(--pan)}.ln.bat{stroke:var(--bat)}
+.ctl{margin-top:12px}
+.ctl .row{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.ctl input{flex:1 1 180px;padding:10px 12px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--tx);font-size:15px}
+.btn{padding:10px 14px;border:0;border-radius:8px;font-size:14px;font-weight:bold;color:#fff;background:var(--bad);cursor:pointer}
+.btn.alt{background:var(--mut)}
+.btn:disabled{opacity:.5;cursor:default}
+#cmdMsg{margin-top:8px;font-size:13px;color:var(--mut);min-height:20px}
 footer{margin:14px 0 4px;color:var(--mut);font-size:12px}
 </style>
 </head>
@@ -71,12 +78,23 @@ footer{margin:14px 0 4px;color:var(--mut);font-size:12px}
     <div id="chart"></div>
   </div>
 
+  <div class="card ctl">
+    <h2>Kontrol Perangkat</h2>
+    <p class="desc">Perintah diteruskan ke ESP32 saat pengiriman data berikutnya (maksimal sekitar 30 detik). Butuh kunci admin.</p>
+    <div class="row"><input type="password" id="adminKey" placeholder="Kunci admin" autocomplete="off"></div>
+    <div class="row">
+      <button class="btn" id="btnReset" onclick="sendCmd('reset_energy','Reset energi (Wh)')">Reset Energi (Wh)</button>
+      <button class="btn alt" id="btnRestart" onclick="sendCmd('restart','Restart ESP32')">Restart ESP32</button>
+    </div>
+    <div id="cmdMsg"></div>
+  </div>
+
   <footer>Diperbarui otomatis tiap 30 detik. Tambahkan <code>?demo=1</code> pada alamat untuk melihat tampilan dengan data contoh.</footer>
 </div>
 
 <script>
 const CONFIG = {
-  API_URL: 'https://script.google.com/macros/s/AKfycbweoFAJxPzS4JceA5hiBrAV3UMhBEmmeWRuoyidHBqAALJ7YoMu2yyucSUmIRSwPHW3/exec',
+  API_URL: 'https://script.google.com/macros/s/AKfycbzUg2vpWQcHK1LVCfAr4DG1blpG1SWV9TT8zB271Pw4P94go6i_MMAFdTEVA6GR-zYf/exec',
   READ_KEY: '',          // isi jika READ_KEY di Code.gs diaktifkan
   REFRESH_MS: 30000,
   HISTORY_POINTS: 120    // 120 titik x 30 detik = 1 jam
@@ -176,6 +194,31 @@ function drawChart(rows) {
   const tm = t => new Date(t).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
   g += `<text x="${L}" y="${H - 6}">${tm(t0)}</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${tm(t1)}</text>`;
   $('chart').innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Grafik daya panel dan baterai">${g}<path class="ln pan" d="${path('a')}"/><path class="ln bat" d="${path('b')}"/></svg>`;
+}
+
+let cmdBusy = false;
+async function sendCmd(cmd, label) {
+  if (cmdBusy) return;
+  const msg = $('cmdMsg'), key = $('adminKey').value.trim();
+  if (demoMode) { msg.textContent = 'Mode demo: perintah tidak dikirim.'; return; }
+  if (!key) { msg.textContent = 'Isi kunci admin dulu.'; return; }
+  const warn = cmd === 'reset_energy' ? '\nCounter energi (Wh) di PZEM akan kembali ke 0 dan tidak bisa dikembalikan.' : '';
+  if (!confirm(label + '?' + warn)) return;
+  cmdBusy = true; $('btnReset').disabled = $('btnRestart').disabled = true;
+  try {
+    await api({ action: 'command', cmd: cmd, admin: key });
+    msg.textContent = 'Perintah terkirim. Menunggu ESP32 mengambilnya (maks. 1 menit)...';
+    for (let n = 0; n < 12; n++) {
+      await new Promise(r => setTimeout(r, 5000));
+      const st = await api({ action: 'latest' });
+      if (!st.pendingCmd) { msg.textContent = 'ESP32 sudah menerima perintah: ' + label + '.'; refresh(); return; }
+    }
+    msg.textContent = 'ESP32 belum mengambil perintah. Pastikan ESP32 online, lalu coba lagi.';
+  } catch (e) {
+    msg.textContent = 'Gagal: ' + e.message;
+  } finally {
+    cmdBusy = false; $('btnReset').disabled = $('btnRestart').disabled = false;
+  }
 }
 
 function banner(msg) { const b = $('banner'); b.textContent = msg || ''; b.style.display = msg ? 'block' : 'none'; }
