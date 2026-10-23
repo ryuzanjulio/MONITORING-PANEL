@@ -112,8 +112,8 @@ const CONFIG = {
   FIREBASE_URL: 'https://monitoring-panel-dc5ba-default-rtdb.asia-southeast1.firebasedatabase.app',
   LIVE_OFFLINE_SEC: 30,  // dianggap offline jika data Firebase lebih tua dari ini (ESP32 kirim tiap 5 detik)
 
-  REFRESH_MS: 60000,     // refresh grafik Spreadsheet
-  HISTORY_POINTS: 120    // 120 titik x 2 menit = 4 jam
+  REFRESH_MS: 10000,      // sebelumnya 60000, grafik ikut diperbarui tiap 10 detik
+  HISTORY_POINTS: 360     // 360 titik x 10 detik = 1 jam (sebelumnya 120)
 };
 
 const DEVICES = [
